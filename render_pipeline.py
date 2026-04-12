@@ -254,6 +254,22 @@ def RunCameraPipelineWithSliders(
     offY = (targetH - newH) // 2
     canvas[offY:offY + newH, offX:offX + newW] = resized
     return canvas
+  
+  def _render_controls_panel(params, width=400, line_height=30):
+    height = max(100, line_height * (len(params) + 1))
+    panel = np.zeros((height, width, 3), dtype=np.uint8)
+
+    for i, (name, value) in enumerate(params.items()):
+      y = 30 + i * line_height
+
+      # sombra
+      cv2.putText(panel, f"{name}: {value}", (10, y),
+                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 3)
+      # texto
+      cv2.putText(panel, f"{name}: {value}", (10, y),
+                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
+
+    return panel
 
   if not isinstance(sliders, list) or len(sliders) == 0:
     raise ValueError("sliders must be a non-empty list of slider specifications")
@@ -307,6 +323,9 @@ def RunCameraPipelineWithSliders(
       for name, minValue, maxValue, _, odd in sliderSpecs:
         rawValue = minValue + cv2.getTrackbarPos(name, controlsWindowName)
         params[name] = _clamp_slider_value(minValue, maxValue, rawValue, odd)
+      
+      controlsPanel = _render_controls_panel(params)
+      cv2.imshow(controlsWindowName, controlsPanel)
 
       pipeline = pipelineBuilder(params)
 
