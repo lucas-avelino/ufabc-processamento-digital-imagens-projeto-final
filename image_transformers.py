@@ -25,6 +25,14 @@ def Sobel(size, scale):
     return cv2.convertScaleAbs(grad_x) + cv2.convertScaleAbs(grad_y)
   return result
 
+def EqualizeHist():
+  def result(img, _):
+    lab_image = cv2.cvtColor(img, cv2.COLOR_BGR2Lab)
+    lab_image[:, :, 0] = cv2.equalizeHist(lab_image[:, :, 0])
+    img = cv2.cvtColor(lab_image, cv2.COLOR_Lab2BGR)
+    return img
+  return result
+
 def CvtColor(code):
   def result(img, _):
     return cv2.cvtColor(img, code)
