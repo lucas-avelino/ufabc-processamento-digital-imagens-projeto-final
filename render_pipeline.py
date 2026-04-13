@@ -225,12 +225,36 @@ def RunCameraPipelineWithSliders(
   itemPerRow=3,
   tileWidth=360,
   minTileWidth=180,
-  windowName="Camera Pipeline",
-  controlsWindowName="Pipeline Controls",
+  windowName="Camera",
+  controlsWindowName="Parametros",
   resizableWindow=True,
   fitToWindow=True,
   initialWindowSize=(1280, 720)
 ):
+  try:
+    import importlib
+
+    QtCore = importlib.import_module("PyQt5.QtCore")
+    QtGui = importlib.import_module("PyQt5.QtGui")
+    QtWidgets = importlib.import_module("PyQt5.QtWidgets")
+
+    Qt = QtCore.Qt
+    QTimer = QtCore.QTimer
+    QImage = QtGui.QImage
+    QPixmap = QtGui.QPixmap
+    QApplication = QtWidgets.QApplication
+    QHBoxLayout = QtWidgets.QHBoxLayout
+    QLabel = QtWidgets.QLabel
+    QMainWindow = QtWidgets.QMainWindow
+    QScrollArea = QtWidgets.QScrollArea
+    QSlider = QtWidgets.QSlider
+    QVBoxLayout = QtWidgets.QVBoxLayout
+    QWidget = QtWidgets.QWidget
+  except ImportError as exc:
+    raise RuntimeError(
+      "PyQt5 is required for RunCameraPipelineWithSliders. Install with: pip install pyqt5"
+    ) from exc
+
   def _clamp_slider_value(minValue, maxValue, value, odd=False):
     value = max(minValue, min(maxValue, int(value)))
     if odd and value % 2 == 0:
@@ -238,38 +262,6 @@ def RunCameraPipelineWithSliders(
       if value > maxValue:
         value = max(minValue, value - 2)
     return value
-
-  def _letterbox_to_window(img, targetW, targetH):
-    h, w = img.shape[:2]
-    if targetW <= 0 or targetH <= 0 or w == 0 or h == 0:
-      return img
-
-    scale = min(targetW / w, targetH / h)
-    newW = max(1, int(w * scale))
-    newH = max(1, int(h * scale))
-    resized = cv2.resize(img, (newW, newH), interpolation=cv2.INTER_AREA)
-
-    canvas = np.zeros((targetH, targetW, 3), dtype=np.uint8)
-    offX = (targetW - newW) // 2
-    offY = (targetH - newH) // 2
-    canvas[offY:offY + newH, offX:offX + newW] = resized
-    return canvas
-  
-  def _render_controls_panel(params, width=400, line_height=30):
-    height = max(100, line_height * (len(params) + 1))
-    panel = np.zeros((height, width, 3), dtype=np.uint8)
-
-    for i, (name, value) in enumerate(params.items()):
-      y = 30 + i * line_height
-
-      # sombra
-      cv2.putText(panel, f"{name}: {value}", (10, y),
-                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 3)
-      # texto
-      cv2.putText(panel, f"{name}: {value}", (10, y),
-                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
-
-    return panel
 
   if not isinstance(sliders, list) or len(sliders) == 0:
     raise ValueError("sliders must be a non-empty list of slider specifications")
@@ -282,76 +274,153 @@ def RunCameraPipelineWithSliders(
       raise ValueError(f"Slider {slider['name']} has max < min")
 
     name = str(slider["name"])
+    label = str(slider.get("label", name))
     minValue = int(slider["min"])
     maxValue = int(slider["max"])
     odd = bool(slider.get("odd", False))
     initial = _clamp_slider_value(minValue, maxValue, slider.get("initial", minValue), odd)
-    sliderSpecs.append((name, minValue, maxValue, initial, odd))
-
-  windowFlags = cv2.WINDOW_NORMAL if resizableWindow else cv2.WINDOW_AUTOSIZE
-  if resizableWindow and hasattr(cv2, "WINDOW_KEEPRATIO"):
-    windowFlags |= cv2.WINDOW_KEEPRATIO
-
-  cv2.namedWindow(windowName, windowFlags)
-  cv2.namedWindow(controlsWindowName, cv2.WINDOW_NORMAL)
-
-  if resizableWindow and initialWindowSize is not None:
-    cv2.resizeWindow(windowName, initialWindowSize[0], initialWindowSize[1])
-
-  for name, minValue, maxValue, initial, _ in sliderSpecs:
-    cv2.createTrackbar(
-      name,
-      controlsWindowName,
-      initial - minValue,
-      maxValue - minValue,
-      lambda _value: None,
+    sliderSpecs.append(
+      {
+        "name": name,
+        "label": label,
+        "min": minValue,
+        "max": maxValue,
+        "initial": initial,
+        "odd": odd,
+      }
     )
 
-  cap = cv2.VideoCapture(cameraIndex)
-  if not cap.isOpened():
-    cv2.destroyWindow(windowName)
-    cv2.destroyWindow(controlsWindowName)
-    raise RuntimeError(f"Could not open camera index {cameraIndex}")
+  class _PipelineQtWindow(QMainWindow):
+    def __init__(self):
+      super().__init__()
+      self.setWindowTitle(windowName)
+      if initialWindowSize is not None:
+        self.resize(initialWindowSize[0], initialWindowSize[1])
 
-  try:
-    while True:
-      ok, frame = cap.read()
-      if not ok:
-        break
+      self.cap = cv2.VideoCapture(cameraIndex)
+      if not self.cap.isOpened():
+        raise RuntimeError(f"Could not open camera index {cameraIndex}")
 
+      central = QWidget()
+      self.setCentralWidget(central)
+      rootLayout = QHBoxLayout(central)
+
+      controlsContainer = QWidget()
+      controlsLayout = QVBoxLayout(controlsContainer)
+      controlsLayout.setContentsMargins(8, 8, 8, 8)
+      controlsLayout.setSpacing(10)
+
+      titleLabel = QLabel(controlsWindowName)
+      titleLabel.setStyleSheet("font-size: 18px; font-weight: 600;")
+      controlsLayout.addWidget(titleLabel)
+
+      self.sliderWidgets = []
+      for spec in sliderSpecs:
+        rowTitle = QLabel(spec["label"])
+        rowTitle.setWordWrap(True)
+        rowTitle.setStyleSheet("font-size: 13px; font-weight: 500;")
+
+        row = QHBoxLayout()
+        slider = QSlider(Qt.Horizontal)
+        slider.setMinimum(spec["min"])
+        slider.setMaximum(spec["max"])
+        slider.setValue(spec["initial"])
+        valueLabel = QLabel(str(spec["initial"]))
+        valueLabel.setMinimumWidth(58)
+        valueLabel.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        row.addWidget(slider, 1)
+        row.addWidget(valueLabel)
+
+        controlsLayout.addWidget(rowTitle)
+        controlsLayout.addLayout(row)
+
+        self.sliderWidgets.append({"spec": spec, "slider": slider, "valueLabel": valueLabel})
+
+      controlsLayout.addStretch(1)
+
+      scroll = QScrollArea()
+      scroll.setWidgetResizable(True)
+      scroll.setWidget(controlsContainer)
+      scroll.setMinimumWidth(420)
+      scroll.setMaximumWidth(560)
+
+      self.previewLabel = QLabel()
+      self.previewLabel.setAlignment(Qt.AlignCenter)
+      self.previewLabel.setMinimumSize(640, 360)
+
+      rootLayout.addWidget(scroll, 0)
+      rootLayout.addWidget(self.previewLabel, 1)
+
+      self.timer = QTimer(self)
+      self.timer.timeout.connect(self._update_frame)
+      self.timer.start(16)
+
+    def _current_params(self):
       params = {}
-      for name, minValue, maxValue, _, odd in sliderSpecs:
-        rawValue = minValue + cv2.getTrackbarPos(name, controlsWindowName)
-        params[name] = _clamp_slider_value(minValue, maxValue, rawValue, odd)
-      
-      controlsPanel = _render_controls_panel(params)
-      cv2.imshow(controlsWindowName, controlsPanel)
+      for item in self.sliderWidgets:
+        spec = item["spec"]
+        rawValue = item["slider"].value()
+        value = _clamp_slider_value(spec["min"], spec["max"], rawValue, spec["odd"])
+        if value != rawValue:
+          item["slider"].blockSignals(True)
+          item["slider"].setValue(value)
+          item["slider"].blockSignals(False)
+        item["valueLabel"].setText(str(value))
+        params[spec["name"]] = value
+      return params
 
-      pipeline = pipelineBuilder(params)
+    def _update_frame(self):
+      ok, frame = self.cap.read()
+      if not ok:
+        return
 
-      grid = _render_pipeline_grid(
-        frame,
-        pipeline,
-        itemPerRow=itemPerRow,
-        tileWidth=tileWidth,
-        minTileWidth=minTileWidth,
-      )
+      params = self._current_params()
 
-      if grid is not None:
-        if resizableWindow and fitToWindow and hasattr(cv2, "getWindowImageRect"):
-          try:
-            _, _, windowW, windowH = cv2.getWindowImageRect(windowName)
-            if windowW > 0 and windowH > 0:
-              grid = _letterbox_to_window(grid, windowW, windowH)
-          except cv2.error:
-            pass
+      try:
+        pipeline = pipelineBuilder(params)
+        grid = _render_pipeline_grid(
+          frame,
+          pipeline,
+          itemPerRow=itemPerRow,
+          tileWidth=tileWidth,
+          minTileWidth=minTileWidth,
+        )
+      except Exception:
+        return
 
-        cv2.imshow(windowName, grid)
+      output = grid
+      if output is None:
+        return
 
-      key = cv2.waitKey(1) & 0xFF
-      if key in (27, ord("q")):
-        break
-  finally:
-    cap.release()
-    cv2.destroyWindow(windowName)
-    cv2.destroyWindow(controlsWindowName)
+      rgb = cv2.cvtColor(output, cv2.COLOR_BGR2RGB)
+      h, w = rgb.shape[:2]
+      qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy()
+      pixmap = QPixmap.fromImage(qimg)
+
+      if fitToWindow:
+        pixmap = pixmap.scaled(
+          self.previewLabel.size(),
+          Qt.KeepAspectRatio,
+          Qt.SmoothTransformation,
+        )
+
+      self.previewLabel.setPixmap(pixmap)
+
+    def closeEvent(self, event):
+      self.timer.stop()
+      if self.cap is not None and self.cap.isOpened():
+        self.cap.release()
+      super().closeEvent(event)
+
+  app = QApplication.instance()
+  ownsApp = False
+  if app is None:
+    app = QApplication([])
+    ownsApp = True
+
+  window = _PipelineQtWindow()
+  window.show()
+
+  if ownsApp:
+    app.exec_()
