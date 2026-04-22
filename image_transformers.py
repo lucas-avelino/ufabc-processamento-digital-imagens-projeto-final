@@ -156,6 +156,166 @@ def ThresholdOtsu():
     return thresh
   return result
 
+def _buildKernel(size, kernelType):
+  if kernelType == KernelType.RECT:
+    return cv2.getStructuringElement(cv2.MORPH_RECT, (size, size))
+  elif kernelType == KernelType.ELLIPSE:
+    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+  elif kernelType == KernelType.CROSS:
+    return cv2.getStructuringElement(cv2.MORPH_CROSS, (size, size))
+  return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+
+def _watershedMarkers(img, openingSize, sureBgIterations, distanceThreshold, kernelType):
+  if img.ndim == 2:
+    gray = img.copy()
+    bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+  else:
+    bgr = img.copy()
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+
+  _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+  kernel = _buildKernel(openingSize, kernelType)
+
+  opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
+  sureBg = cv2.dilate(opening, kernel, iterations=sureBgIterations)
+
+  dist = cv2.distanceTransform(opening, cv2.DIST_L2, 5)
+  _, sureFg = cv2.threshold(dist, distanceThreshold * dist.max(), 255, 0)
+  sureFg = np.uint8(sureFg)
+  unknown = cv2.subtract(sureBg, sureFg)
+
+  _, markers = cv2.connectedComponents(sureFg)
+  markers = markers + 1
+  markers[unknown == 255] = 0
+  return cv2.watershed(bgr, markers)
+
+def WatershedMask(
+  openingSize = 3,
+  sureBgIterations = 2,
+  distanceThreshold = 0.4,
+  kernelType = KernelType.ELLIPSE,
+  amountOfAreas = 1,
+  sourceIndex = None,
+  closeSize = None,
+  excludeBorderLabels = True,
+  maxAreaRatio = 0.35,
+):
+  def result(img, previousResults):
+    def _fallbackMask(src):
+      if src.ndim == 3:
+        g = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
+      else:
+        g = src.copy()
+
+      _, th = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+      k = _buildKernel(max(3, openingSize), kernelType)
+      th = cv2.morphologyEx(th, cv2.MORPH_OPEN, k, iterations=1)
+      th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=2)
+
+      contours, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+      if not contours:
+        return np.zeros_like(g, dtype=np.uint8)
+
+      h, w = g.shape[:2]
+      valid = []
+      for cnt in contours:
+        x, y, cw, ch = cv2.boundingRect(cnt)
+        touchesBorder = x == 0 or y == 0 or (x + cw) >= w - 1 or (y + ch) >= h - 1
+        area = cv2.contourArea(cnt)
+        if not touchesBorder and area > 0:
+          valid.append((area, cnt))
+
+      if not valid:
+        return np.zeros_like(g, dtype=np.uint8)
+
+      valid.sort(key=lambda item: item[0], reverse=True)
+      out = np.zeros_like(g, dtype=np.uint8)
+      cv2.drawContours(out, [valid[0][1]], -1, 255, thickness=-1)
+      return out
+
+    source = img
+    if sourceIndex is not None and sourceIndex >= 0 and sourceIndex < len(previousResults):
+      source = previousResults[sourceIndex]
+
+    markers = _watershedMarkers(source, openingSize, sureBgIterations, distanceThreshold, kernelType)
+
+    validLabels = markers[(markers > 1)]
+    if validLabels.size == 0:
+      return _fallbackMask(source)
+
+    if excludeBorderLabels:
+      borderLabels = set(np.unique(markers[0, :]))
+      borderLabels.update(np.unique(markers[-1, :]))
+      borderLabels.update(np.unique(markers[:, 0]))
+      borderLabels.update(np.unique(markers[:, -1]))
+      validLabels = validLabels[~np.isin(validLabels, list(borderLabels))]
+      if validLabels.size == 0:
+        return _fallbackMask(source)
+
+    uniqueLabels, counts = np.unique(validLabels, return_counts=True)
+    if maxAreaRatio is not None:
+      maxArea = max(1, int(markers.size * maxAreaRatio))
+      allowed = counts <= maxArea
+      uniqueLabels = uniqueLabels[allowed]
+      counts = counts[allowed]
+      if uniqueLabels.size == 0:
+        return _fallbackMask(source)
+
+    topCount = max(1, min(amountOfAreas, uniqueLabels.size))
+    topIndices = np.argsort(counts)[::-1][:topCount]
+    selectedLabels = uniqueLabels[topIndices]
+
+    mask = np.isin(markers, selectedLabels).astype(np.uint8) * 255
+
+    # Close gaps in region borders and keep only external filled components.
+    closeKernelSize = closeSize if closeSize is not None else max(3, openingSize * 2 + 1)
+    closeKernel = _buildKernel(closeKernelSize, kernelType)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, closeKernel, iterations=1)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    filledMask = np.zeros_like(mask)
+    if contours:
+      cv2.drawContours(filledMask, contours, -1, 255, thickness=-1)
+      return filledMask
+
+    return mask
+  return result
+
+def Watershed(
+  openingSize = 3,
+  sureBgIterations = 2,
+  distanceThreshold = 0.4,
+  kernelType = KernelType.ELLIPSE,
+  markBoundaries = True,
+  boundaryColor = (0, 0, 255),
+  returnMarkers = False,
+):
+  def result(img, _):
+    if img.ndim == 2:
+      bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+      gray = img
+    else:
+      bgr = img.copy()
+      gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+
+    markers = _watershedMarkers(img, openingSize, sureBgIterations, distanceThreshold, kernelType)
+
+    if returnMarkers:
+      return markers
+
+    if markBoundaries:
+      output = bgr.copy()
+      output[markers == -1] = boundaryColor
+      return output
+
+    labels = markers.copy()
+    labels[labels < 0] = 0
+    if labels.max() == 0:
+      return np.zeros_like(gray)
+    labels = np.uint8((labels / labels.max()) * 255)
+    return labels
+  return result
+
 def ResizeKeepAspectRatio(targetW, targetH):
   def result(img, _):
     h, w = img.shape[:2]
