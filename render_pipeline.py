@@ -1,3 +1,14 @@
+'''
+## Integrantes do grupo:
+
+- 11201811864 - Lucas Araujo Avelino Dos Santos
+- 11201920812 - Vithório da Cunha Marques
+- 11202231732 - Wagner Ryu Kamiya
+
+### Data da última atualização: 26/04/2026
+'''
+
+
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
