@@ -456,3 +456,180 @@ def RunVideoPipeline(
         cv2.destroyWindow("Preview")
       except Exception:
         pass
+
+
+def _render_pipeline_last_grid(
+  frame,
+  pipeline,
+  itemPerRow=3,
+  tileWidth=360,
+  minTileWidth=180
+):
+  steps = RunPipeline(frame, pipeline)
+  if not steps:
+    return None
+
+  items_all = _pipeline_display_items(steps)
+  if not items_all:
+    return None
+
+  last_idx = len(steps)
+  prefix = f"Step {last_idx}"
+  items = [(t, i) for (t, i) in items_all if t.startswith(prefix)]
+  if not items:
+    return None
+
+  cols = min(itemPerRow, len(items))
+  targetTileWidth = max(minTileWidth, tileWidth)
+
+  tiles = []
+  for title, img in items:
+    if img.ndim == 2:
+      vis = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    else:
+      vis = img.copy()
+
+    h, w = vis.shape[:2]
+    tileHeight = max(1, int(h * (targetTileWidth / w)))
+    vis = cv2.resize(vis, (targetTileWidth, tileHeight), interpolation=cv2.INTER_AREA)
+    cv2.putText(vis, title, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+    tiles.append(vis)
+
+  rows = (len(tiles) + cols - 1) // cols
+  blank = np.zeros_like(tiles[0])
+  gridRows = []
+  for r in range(rows):
+    rowTiles = []
+    for c in range(cols):
+      idx = r * cols + c
+      rowTiles.append(tiles[idx] if idx < len(tiles) else blank)
+    gridRows.append(np.hstack(rowTiles))
+
+  return np.vstack(gridRows)
+
+
+def _render_pipeline_last_image(
+  frame,
+  pipeline,
+  tileWidth=360,
+  minTileWidth=180
+):
+  steps = RunPipeline(frame, pipeline)
+  if not steps:
+    return None
+
+  items_all = _pipeline_display_items(steps)
+  if not items_all:
+    return None
+
+  last_idx = len(steps)
+  prefix = f"Step {last_idx}"
+  items = [(t, i) for (t, i) in items_all if t.startswith(prefix)]
+  if not items:
+    return None
+
+  images = [img for (_t, img) in items]
+
+  def _to_bgr(img):
+    if img.ndim == 2:
+      return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    return img.copy()
+
+  if len(images) == 1:
+    return _to_bgr(images[0]).astype(np.uint8)
+
+  # Multiple images: resize each to have consistent tile width and concatenate horizontally
+  targetTileWidth = max(minTileWidth, tileWidth)
+  tiles = []
+  for img in images:
+    vis = _to_bgr(img)
+    h, w = vis.shape[:2]
+    tileHeight = max(1, int(h * (targetTileWidth / w)))
+    vis = cv2.resize(vis, (targetTileWidth, tileHeight), interpolation=cv2.INTER_AREA)
+    tiles.append(vis)
+
+  # If heights mismatch, pad to max height
+  maxH = max(t.shape[0] for t in tiles)
+  padded = []
+  for t in tiles:
+    if t.shape[0] < maxH:
+      pad = np.zeros((maxH - t.shape[0], t.shape[1], 3), dtype=np.uint8)
+      t = np.vstack([t, pad])
+    padded.append(t)
+
+  return np.hstack(padded)
+
+
+def RunVideoPipelineLastStep(
+  inputPath,
+  outputPath,
+  pipeline,
+  itemPerRow=3,
+  tileWidth=360,
+  minTileWidth=180,
+  fourcc='mp4v',
+  fps=None,
+  max_frames=None,
+  show_preview=False
+):
+  cap = cv2.VideoCapture(inputPath)
+  if not cap.isOpened():
+    raise RuntimeError(f"Could not open input video: {inputPath}")
+
+  out = None
+  try:
+    src_fps = cap.get(cv2.CAP_PROP_FPS) or 0
+    if fps is None or fps <= 0:
+      fps = src_fps if src_fps > 0 else 30.0
+
+    ok, frame = cap.read()
+    if not ok:
+      raise RuntimeError("Could not read first frame from input video")
+
+    img = _render_pipeline_last_image(frame, pipeline, tileWidth=tileWidth, minTileWidth=minTileWidth)
+    if img is None:
+      raise RuntimeError("Pipeline produced no visual output for first frame (last step)")
+
+    img = img.astype(np.uint8)
+    h, w = img.shape[:2]
+
+    fourcc_int = cv2.VideoWriter_fourcc(*fourcc)
+    out = cv2.VideoWriter(outputPath, fourcc_int, float(fps), (w, h))
+    if not out.isOpened():
+      raise RuntimeError(f"Could not open output video for writing: {outputPath}")
+
+    out.write(img)
+    frameCount = 1
+
+    if show_preview:
+      cv2.namedWindow("Preview Last Step", cv2.WINDOW_NORMAL)
+
+    while True:
+      if max_frames is not None and frameCount >= int(max_frames):
+        break
+      ok, frame = cap.read()
+      if not ok:
+        break
+
+      img = _render_pipeline_last_image(frame, pipeline, tileWidth=tileWidth, minTileWidth=minTileWidth)
+      if img is None:
+        continue
+
+      img = img.astype(np.uint8)
+      out.write(img)
+
+      if show_preview:
+        cv2.imshow("Preview Last Step", img)
+        if cv2.waitKey(1) & 0xFF in (27, ord("q")):
+          break
+
+      frameCount += 1
+  finally:
+    cap.release()
+    if out is not None:
+      out.release()
+    if show_preview:
+      try:
+        cv2.destroyWindow("Preview Last Step")
+      except Exception:
+        pass
