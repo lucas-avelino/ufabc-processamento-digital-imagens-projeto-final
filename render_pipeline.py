@@ -367,3 +367,92 @@ def RunCameraPipelineWithSliders(
     cap.release()
     cv2.destroyWindow(windowName)
     cv2.destroyWindow(controlsWindowName)
+
+
+def RunVideoPipeline(
+  inputPath,
+  outputPath,
+  pipeline,
+  itemPerRow=3,
+  tileWidth=360,
+  minTileWidth=180,
+  fourcc='mp4v',
+  fps=None,
+  max_frames=None,
+  show_preview=False
+):
+  """
+  Aplica a pipeline em cada frame do vídeo `inputPath` e salva o resultado em `outputPath`.
+
+  Parâmetros:
+  - inputPath: caminho para o arquivo de entrada
+  - outputPath: caminho para o arquivo de saída (ex: output.mp4)
+  - pipeline: pipeline compatível com RunPipeline
+  - itemPerRow, tileWidth, minTileWidth: parâmetros de layout dos tiles
+  - fourcc: codec fourcc string (p.ex. 'mp4v', 'XVID')
+  - fps: frames por segundo de saída (se None, tenta usar do vídeo de entrada, senão 30)
+  - max_frames: se definido, limita número de frames processados
+  - show_preview: se True, mostra pré-visualização durante processamento
+  """
+  cap = cv2.VideoCapture(inputPath)
+  if not cap.isOpened():
+    raise RuntimeError(f"Could not open input video: {inputPath}")
+
+  out = None
+  try:
+    src_fps = cap.get(cv2.CAP_PROP_FPS) or 0
+    if fps is None or fps <= 0:
+      fps = src_fps if src_fps > 0 else 30.0
+
+    # read first frame to determine output size
+    ok, frame = cap.read()
+    if not ok:
+      raise RuntimeError("Could not read first frame from input video")
+
+    grid = _render_pipeline_grid(frame, pipeline, itemPerRow=itemPerRow, tileWidth=tileWidth, minTileWidth=minTileWidth)
+    if grid is None:
+      raise RuntimeError("Pipeline produced no visual output for first frame")
+
+    grid = grid.astype(np.uint8)
+    h, w = grid.shape[:2]
+
+    fourcc_int = cv2.VideoWriter_fourcc(*fourcc)
+    out = cv2.VideoWriter(outputPath, fourcc_int, float(fps), (w, h))
+    if not out.isOpened():
+      raise RuntimeError(f"Could not open output video for writing: {outputPath}")
+
+    out.write(grid)
+    frameCount = 1
+
+    if show_preview:
+      cv2.namedWindow("Preview", cv2.WINDOW_NORMAL)
+
+    while True:
+      if max_frames is not None and frameCount >= int(max_frames):
+        break
+      ok, frame = cap.read()
+      if not ok:
+        break
+
+      grid = _render_pipeline_grid(frame, pipeline, itemPerRow=itemPerRow, tileWidth=tileWidth, minTileWidth=minTileWidth)
+      if grid is None:
+        continue
+
+      grid = grid.astype(np.uint8)
+      out.write(grid)
+
+      if show_preview:
+        cv2.imshow("Preview", grid)
+        if cv2.waitKey(1) & 0xFF in (27, ord("q")):
+          break
+
+      frameCount += 1
+  finally:
+    cap.release()
+    if out is not None:
+      out.release()
+    if show_preview:
+      try:
+        cv2.destroyWindow("Preview")
+      except Exception:
+        pass
