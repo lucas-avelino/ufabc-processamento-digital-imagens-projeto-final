@@ -83,6 +83,7 @@ def ShowAll(images, itemPerRow=3):
     ax.axis("off")
 
   fig.tight_layout()
+  plt.savefig("images/pipeline_output.png")
   plt.show()
 
 def RunCameraPipeline(
